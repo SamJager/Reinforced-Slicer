@@ -1,79 +1,65 @@
-# 5-Axis Path Planning & Slicing Literature Compilation
+# Reinforced-Slicer
 
-Compiled by Claude on 2026-04-22 for a 5-axis additive manufacturing slicer/path-planner project.
+A 5-axis additive manufacturing slicer focused on **continuous fiber reinforced thermoplastic (CFRTP)** parts. Python, MIT-licensed, machine-agnostic.
 
-## Project scope
+> **Status:** pre-alpha. M0 (3-axis planar baseline) is the first milestone — present so the toolchain can be validated end to end. The interesting 5-axis and fiber-aware code lands in later milestones.
 
-The deliverable target is a **5-axis additive manufacturing** slicer/path-planning system. Because much of the algorithmic foundation for 5-axis path generation comes from CNC machining, this bibliography deliberately includes machining literature alongside AM literature. The ideas to transfer from machining → AM include: cutter contact (CC) point planning, tool orientation optimization, scallop-height and iso-* path topologies, kinematic singularity handling, postprocessor design, and collision/gouging avoidance.
+## Why another slicer?
 
-## Files
+Existing open-source slicers (Cura, PrusaSlicer, OrcaSlicer, Slic3r) are all 3-axis and AGPL/LGPL — hard to extend into a 5-axis fiber-aware pipeline without inheriting copyleft licenses. Research-grade 5-axis code (CurviSlicer, S³-Slicer, VoxelMultiAxisAM) is C++/CUDA and tightly coupled to specific hardware.
 
-- **`README.md`** — this file. Explains the schema, the tagging system, and the topic clusters.
-- **`bibliography.md`** — the main annotated bibliography, grouped by topic cluster. Each entry has full citation, an access tag, an IP/use tag, and a 1–3 sentence relevance note.
-- **`bibliography.csv`** — the same data as a spreadsheet so you can sort, filter, or import into a reference manager.
-- **`overview.md`** — a short narrative overview of the field that maps the bibliography to research themes and identifies the “must-read” entry points.
-- **`gaps_and_next_steps.md`** — what this compilation does *not* cover well, plus suggested next searches and reference managers.
+This project tries to fill the gap: a Python, permissively-licensed, end-to-end pipeline (mesh → curved layers → fiber paths → 5-axis G-code) that doesn't assume a specific machine. See [`References/`](References/) for the literature this builds on, especially [`References/KNOWLEDGE.md`](References/KNOWLEDGE.md) and [`References/SOFTWARE_INDEX.md`](References/SOFTWARE_INDEX.md).
 
-## Tagging system
+## Milestones
 
-Two orthogonal tags per entry: an **access tag** (can I read it?) and an **IP/use tag** (can I borrow algorithms or code?).
+| M  | Deliverable | Status |
+|----|---|---|
+| M0 | Repo scaffold, CI, planar 3-axis slicer that emits valid G-code | **in progress** |
+| M1 | URDF-driven machine model + Sørby IK + singularity smoothing | planned |
+| M2 | CurviSlicer algorithm reimplemented in Python (OSQP-based QP) | planned |
+| M3 | Tet mesh + scalar-field iso-surfacing → curved layers | planned |
+| M4 | 2-RoSy direction field + stripe-pattern paths on a curved layer | planned |
+| M5 | End-to-end STL + (mock) stress → 5-axis fiber G-code + viz | planned |
+| M6+ | High-density paths (Fang 2024 periodic field), winding around holes, dual-material | planned |
 
-### Access tags
+## Quickstart
 
-| Tag | Meaning |
-|---|---|
-| `OA` | Open access journal article — free to read, usually CC-licensed for reuse with attribution |
-| `Preprint` | arXiv / engrXiv / HAL / institutional preprint — free to read, license varies (often author-retained) |
-| `Author-PDF` | Paywalled venue, but author-hosted PDF exists on a personal/lab/repository page |
-| `Paywalled` | Behind a journal/publisher paywall; abstract is free |
-| `Thesis` | Master's or PhD thesis from a university repository — usually free to read |
-| `Industry` | Vendor whitepaper, industry blog, trade press — free to read, marketing-tinted |
-| `Patent` | Granted patent or published application — free to read on Google Patents / Espacenet, but legally protected IP |
-| `Standard` | Published standard (ISO/ASTM etc.) — usually paid |
-| `Code-OSS` | Open-source code repository — license noted in entry |
-| `Code-Closed` | Commercial software, no source available |
+Requires Python 3.11+.
 
-### IP / use tags
+```bash
+git clone https://github.com/SamJager/Reinforced-Slicer.git
+cd Reinforced-Slicer
+python -m venv .venv
+.venv\Scripts\activate          # PowerShell: .venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
 
-| Tag | Meaning |
-|---|---|
-| `Reference-only` | Cite the idea, do not copy text/figures/code |
-| `Cite-and-paraphrase` | OA or preprint — safe to discuss in detail with citation; do not reproduce figures/text without checking the license |
-| `Algorithm-reusable` | The paper describes an algorithm at a level you could re-implement freely; only the *expression* (their text/figures/code) is protected |
-| `Code-MIT` / `Code-GPL` / `Code-Apache` / `Code-BSD` / `Code-Proprietary` | Source code is available under the named license — read the LICENSE file before vendoring |
-| `Patent-active` | Granted patent that may still be in force (US patents typically last 20 years from filing). **Implementing the claims commercially could infringe.** Get legal advice for any product. |
-| `Patent-expired-or-application` | Either expired (free to practice) or only an application (not yet enforceable). Still verify before relying. |
+# Slice a cube
+python -c "import trimesh; trimesh.creation.box((10,10,10)).apply_translation([5,5,5]).export('cube.stl')"
+reinforced-slicer cube.stl -o cube.gcode
 
-A note on patents: I've flagged anything that looks like it could plausibly read on a 5-axis-AM slicer/path-planner. **Patent claims are interpreted by lawyers, not by Claude.** Before shipping a commercial product, get a freedom-to-operate (FTO) opinion from a patent attorney in your jurisdiction. For research or open-source work, the risk profile is much lower but still nonzero.
+# Run the test suite
+pytest
+```
 
-A note on algorithms vs. expression (US/EU IP basics, not legal advice): In most jurisdictions, **algorithms and ideas are not copyrightable** — only the specific *expression* (the paper's text, the figures, the source code) is. So if a paper is paywalled, you can still re-implement its algorithm from a description in your own words. What you cannot do is copy the paper's text, figures, or pseudocode verbatim. Patents are the exception: a patented algorithm/method is protected as a *method* regardless of how you express it.
+## Repo layout
 
-## Topic clusters used in `bibliography.md`
+```
+src/reinforced_slicer/
+  io/           # mesh I/O, G-code output
+  mesh/         # surface + tetrahedral mesh utilities
+  fea/          # stress-field input (mock for now, real backend deferred)
+  slicing/      # planar (M0), CurviSlicer (M2), S³-field (M3+)
+  pathing/      # zigzag (M0), direction-field, stripe-pattern, Eulerian linking
+  kinematics/   # URDF/DH machine model, IK, singularity smoothing
+  postproc/     # paths -> G-code, collision checks
+  viz/          # PyVista-based 3D preview (optional dependency)
+tests/          # pytest suite
+examples/       # demo parts (added as milestones progress)
+References/     # curated literature compilation
+```
 
-1. **Reviews & surveys** — start here for a fast overview
-2. **Foundational multi-axis AM (curved-layer slicing & support-free)** — the core algorithmic literature
-3. **Volume / model decomposition for multi-directional printing**
-4. **Tool-path generation on curved surfaces (geodesic, vector-field, iso-* methods)**
-5. **Stress-aligned & fiber-reinforced multi-axis printing**
-6. **Hybrid additive + subtractive manufacturing (5-axis HASM/ASHM)**
-7. **Wire-arc & DED multi-axis path planning**
-8. **Build orientation & part decomposition (3-axis precursors directly relevant)**
-9. **5-axis CNC machining — tool path generation (transferable to AM)**
-10. **5-axis CNC machining — kinematics, singularities, postprocessor**
-11. **Hardware & open-source 5-axis printers**
-12. **Open-source software, slicers, and code repositories**
-13. **Patents**
-14. **Industry / commercial systems**
-15. **Theses & dissertations**
-16. **Adjacent: non-planar 3-axis & specialty (concrete, hydrogel, bio)**
+## License
 
-## How exhaustive is this?
+MIT. See [LICENSE](LICENSE). We deliberately avoid vendoring GPL/AGPL slicer code so this project can stay permissively licensed.
 
-This compilation is **substantial but not exhaustive**. It covers an estimated 60–90% of the most-cited and most-relevant works as of early 2026. To reach true exhaustiveness you would want to:
-
-1. Run systematic searches on Scopus, Web of Science, and IEEE Xplore using strings like `(("five-axis" OR "5-axis" OR "multi-axis") AND ("additive manufacturing" OR "3D printing") AND ("path planning" OR "slicing" OR "tool path"))`.
-2. Snowball forward and backward citations from the four most-cited "anchor" papers: Dai et al. 2018 (Support-Free Volume Printing), Etienne et al. 2019 (CurviSlicer), Fang et al. 2020 (Reinforced FDM), and Zhang et al. 2022 (S³-Slicer).
-3. Add Chinese-language literature — there is a large body of work in journals like *Computer Integrated Manufacturing Systems* and from Chinese universities (Huazhong UST, Tsinghua, SJTU) that I did not search for in Chinese.
-4. Add USPTO / Espacenet / WIPO patent searches — Google Patents only covers a fraction.
-
-See `gaps_and_next_steps.md` for more.
+Algorithms from the literature (CurviSlicer, S³-Slicer, Fang 2024, etc.) are reimplemented from descriptions — copyright protects expression, not algorithms. Where a specific patent might cover a method (e.g., the WIPO spherical-coordinate patent), it's flagged in `References/KNOWLEDGE.md` §11. This is not legal advice.

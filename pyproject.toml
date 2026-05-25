@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reinforced-slicer"
+version = "0.0.1"
+description = "A 5-axis additive manufacturing slicer for continuous fiber reinforced thermoplastic parts."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Reinforced-Slicer contributors" }]
+keywords = [
+    "additive-manufacturing",
+    "3d-printing",
+    "5-axis",
+    "slicer",
+    "fiber-reinforced",
+    "cfrtp",
+    "path-planning",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.12",
+    "trimesh>=4.0",
+    "shapely>=2.0",
+    "networkx>=3.2",
+]
+
+[project.optional-dependencies]
+viz = ["pyvista>=0.43"]
+kinematics = ["yourdfpy>=0.0.56"]
+qp = ["osqp>=0.6.7"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+reinforced-slicer = "reinforced_slicer.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reinforced_slicer"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
