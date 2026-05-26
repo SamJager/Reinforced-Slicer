@@ -24,3 +24,11 @@ and routes through it via subprocess (mere-aggregation argument) so the
 core slicer stays MIT. Users who don't install the extra get the
 synthetic-mesh path only.
 """
+
+from reinforced_slicer.mesh.isosurface import (
+    IsoSurface,
+    extract_curved_layers,
+    extract_isosurface,
+)
+
+__all__ = ["IsoSurface", "extract_curved_layers", "extract_isosurface"]

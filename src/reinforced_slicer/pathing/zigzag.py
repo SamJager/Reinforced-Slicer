@@ -20,22 +20,21 @@ def zigzag_fill(polygon: Polygon | MultiPolygon, spacing: float, angle_deg: floa
         list(polygon.geoms) if isinstance(polygon, MultiPolygon) else [polygon]
     )
 
+    # Convention: row vectors, ``v_local = v_world @ rot``. ``rot`` is the
+    # rotation matrix for column vectors; right-multiplying a row vector
+    # by ``rot`` rotates the polygon by **-angle** into a frame where the
+    # zigzag scan lines are horizontal. The inverse mapping back to world
+    # coordinates is right-multiplication by ``rot.T``.
     theta = np.deg2rad(angle_deg)
     c, s = np.cos(theta), np.sin(theta)
     rot = np.array([[c, -s], [s, c]])
-    inv_rot = rot.T
 
     paths: list[np.ndarray] = []
     for component in components:
-        coords = np.asarray(component.exterior.coords)
-        local = coords @ rot
-        y_min, y_max = local[:, 1].min(), local[:, 1].max()
-
-        n_lines = max(1, int(np.ceil((y_max - y_min) / spacing)))
-        # Rotate the component into local frame for line generation.
-        component_local = _rotate_polygon(component, inv_rot)
-        x_min, _, x_max, _ = component_local.bounds
+        component_local = _rotate_polygon(component, rot)
+        x_min, y_min, x_max, y_max = component_local.bounds
         pad = max(1.0, (x_max - x_min) * 0.05)
+        n_lines = max(1, int(np.ceil((y_max - y_min) / spacing)))
 
         segments: list[np.ndarray] = []
         for i in range(n_lines + 1):
@@ -53,12 +52,8 @@ def zigzag_fill(polygon: Polygon | MultiPolygon, spacing: float, angle_deg: floa
         if not segments:
             continue
 
-        # Stitch segments into a single connected polyline by inserting jumps.
-        stitched = [segments[0]]
-        for seg in segments[1:]:
-            stitched.append(seg)
-        polyline_local = np.vstack(stitched)
-        polyline_world = polyline_local @ inv_rot.T
+        polyline_local = np.vstack(segments)
+        polyline_world = polyline_local @ rot.T
         paths.append(polyline_world)
 
     return paths

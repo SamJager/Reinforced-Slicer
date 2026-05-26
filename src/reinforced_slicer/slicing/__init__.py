@@ -1,5 +1,9 @@
 """Volume-to-layer slicing strategies."""
 
+from reinforced_slicer.slicing.curved_5axis import (
+    CurvedSlicePipelineResult,
+    curved_layer_5axis_pipeline,
+)
 from reinforced_slicer.slicing.curvi_2d import (
     CurviSlicer2DConfig,
     CurviSlicer2DResult,
@@ -15,10 +19,12 @@ from reinforced_slicer.slicing.curvi_3d import (
 from reinforced_slicer.slicing.planar import slice_planar
 
 __all__ = [
+    "CurvedSlicePipelineResult",
     "CurviSlicer2DConfig",
     "CurviSlicer2DResult",
     "CurviSlicer3DConfig",
     "CurviSlicer3DResult",
+    "curved_layer_5axis_pipeline",
     "slice_planar",
     "solve_displacement",
     "solve_displacement_3d",
