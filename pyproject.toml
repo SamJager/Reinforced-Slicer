@@ -34,12 +34,12 @@ dependencies = [
     "trimesh>=4.0",
     "shapely>=2.0",
     "networkx>=3.2",
+    "osqp>=0.6.7",
 ]
 
 [project.optional-dependencies]
 viz = ["pyvista>=0.43"]
 kinematics = ["yourdfpy>=0.0.56"]
-qp = ["osqp>=0.6.7"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.1",
