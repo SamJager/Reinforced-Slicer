@@ -22,7 +22,7 @@ This project tries to fill the gap: a Python, permissively-licensed, end-to-end 
 | M2c  | 3D CurviSlicer + marching tets + curved paths + end-to-end pipeline | ✅ |
 | GUI  | Gradio frontend with 4 workflow tabs | ✅ |
 | M3   | Real STL tetrahedralisation via LGPL `gmsh` (`[tet]` extra) | ✅ |
-| M4   | 2-RoSy direction field + stripe-pattern paths for fiber alignment | planned |
+| M4   | Direction field + stripe-pattern (Poisson) fiber-aligned paths | ✅ |
 | M5   | Real FEA backend (stress field input to QP) | planned |
 | M6+  | High-density fiber paths (Fang 2024), winding around holes, multi-material | planned |
 

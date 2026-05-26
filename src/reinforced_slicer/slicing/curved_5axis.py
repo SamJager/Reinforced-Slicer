@@ -35,6 +35,7 @@ from reinforced_slicer.kinematics import Machine
 from reinforced_slicer.mesh.isosurface import extract_curved_layers
 from reinforced_slicer.mesh.tet import TetMesh
 from reinforced_slicer.pathing.curved import plan_path_on_surface
+from reinforced_slicer.pathing.fiber import plan_fiber_path_on_surface
 from reinforced_slicer.postproc.gcode import GcodeConfig
 from reinforced_slicer.postproc.gcode_5axis import (
     Gcode5AxisConfig,
@@ -72,8 +73,20 @@ def curved_layer_5axis_pipeline(
     five_axis_config: Gcode5AxisConfig | None = None,
     output_path: Path | None = None,
     alternate_infill_angle: bool = True,
+    path_strategy: str = "zigzag",
+    fiber_angle_deg: float = 0.0,
 ) -> CurvedSlicePipelineResult:
-    """Run the full QP → iso-surfaces → curved paths → 5-axis G-code pipeline."""
+    """Run the full QP → iso-surfaces → curved paths → 5-axis G-code pipeline.
+
+    ``path_strategy`` picks the per-layer toolpath generator:
+
+    * ``"zigzag"`` (default) — the XY-zigzag-projected-onto-surface
+      planner from M2c.3. Alternates 0°/90° between layers if
+      ``alternate_infill_angle`` is set.
+    * ``"fiber"`` — the M4 fiber-aligned planner: stripe scalar field
+      whose iso-lines run parallel to ``fiber_angle_deg`` (XY plane,
+      projected onto each curved layer's tangent plane).
+    """
     curvi_result = solve_displacement_3d(
         tet_mesh, top_indices, bottom_indices, curvi_config
     )
@@ -84,8 +97,14 @@ def curved_layer_5axis_pipeline(
     total_paths = 0
     total_points = 0
     for i, iso in enumerate(iso_layers):
-        angle = 90.0 if (alternate_infill_angle and i % 2) else 0.0
-        paths = plan_path_on_surface(iso, spacing=path_spacing, angle_deg=angle)
+        if path_strategy == "fiber":
+            angle = fiber_angle_deg + (90.0 if alternate_infill_angle and i % 2 else 0.0)
+            paths = plan_fiber_path_on_surface(iso, spacing=path_spacing, fiber_angle_deg=angle)
+        elif path_strategy == "zigzag":
+            angle = 90.0 if (alternate_infill_angle and i % 2) else 0.0
+            paths = plan_path_on_surface(iso, spacing=path_spacing, angle_deg=angle)
+        else:
+            raise ValueError(f"Unknown path_strategy {path_strategy!r}")
         oriented_layers.append(paths)
         total_paths += len(paths)
         total_points += sum(len(p) for p in paths)

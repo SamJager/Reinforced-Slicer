@@ -255,6 +255,8 @@ def _run_curved_slice(
     z_target_override: float,
     use_z_target_override: bool,
     backend: str = "auto",
+    path_strategy: str = "zigzag",
+    fiber_angle_deg: float = 0.0,
     progress=gr.Progress(),
 ):
     if mesh is None and shoebox is None:
@@ -296,13 +298,20 @@ def _run_curved_slice(
         layer_height=float(layer_height),
         path_spacing=float(path_spacing),
         curvi_config=cfg,
+        path_strategy=str(path_strategy),
+        fiber_angle_deg=float(fiber_angle_deg),
     )
 
     progress(0.55, desc="Extracting iso-surfaces")
     field = result.field
     iso_layers = extract_curved_layers(shoebox.mesh, field, layer_height=float(layer_height))
     progress(0.75, desc="Planning paths on curved layers")
-    oriented_layers = _replan_paths_for_viz(iso_layers, float(path_spacing))
+    oriented_layers = _replan_paths_for_viz(
+        iso_layers,
+        float(path_spacing),
+        strategy=str(path_strategy),
+        fiber_angle_deg=float(fiber_angle_deg),
+    )
 
     progress(0.9, desc="Exporting OBJ + G-code")
     obj_path = _WORK_DIR / "curved_layers.obj"
@@ -356,15 +365,25 @@ def _pct_to_range(iso, lo_pct: float, hi_pct: float) -> tuple[int, int]:
     return lo, hi
 
 
-def _replan_paths_for_viz(iso_layers, spacing: float):
+def _replan_paths_for_viz(
+    iso_layers,
+    spacing: float,
+    strategy: str = "zigzag",
+    fiber_angle_deg: float = 0.0,
+):
     """Re-run the path planner on each layer so we can plot the actual paths
     that were emitted (the pipeline keeps them only as side-effects in G-code)."""
     from reinforced_slicer.pathing.curved import plan_path_on_surface
+    from reinforced_slicer.pathing.fiber import plan_fiber_path_on_surface
 
     out = []
     for i, iso in enumerate(iso_layers):
-        angle = 90.0 if i % 2 else 0.0
-        out.append(plan_path_on_surface(iso, spacing=spacing, angle_deg=angle))
+        if strategy == "fiber":
+            angle = fiber_angle_deg + (90.0 if i % 2 else 0.0)
+            out.append(plan_fiber_path_on_surface(iso, spacing=spacing, fiber_angle_deg=angle))
+        else:
+            angle = 90.0 if i % 2 else 0.0
+            out.append(plan_path_on_surface(iso, spacing=spacing, angle_deg=angle))
     return out
 
 
@@ -663,6 +682,22 @@ def build_app() -> gr.Blocks:
                             use_target = gr.Checkbox(value=False, label="Override z_target")
                             z_target = gr.Slider(0.0, 100.0, value=20.0, step=0.5, label="z_target (mm)")
                         with gr.Group():
+                            gr.Markdown("**Path strategy**")
+                            path_strategy = gr.Radio(
+                                choices=["zigzag", "fiber"],
+                                value="zigzag",
+                                label="Path strategy",
+                                info=(
+                                    "`zigzag` = XY raster projected onto the curved layer (M2c.3). "
+                                    "`fiber` = stripe scalar field whose iso-lines run along the "
+                                    "chosen fiber direction (M4)."
+                                ),
+                            )
+                            fiber_angle = gr.Slider(
+                                0, 180, value=0, step=5,
+                                label="Fiber angle (°, XY plane, 0 = +X, 90 = +Y)",
+                            )
+                        with gr.Group():
                             gr.Markdown("**Visualisation**")
                             arrow_every = gr.Slider(
                                 0, 40, value=12, step=1,
@@ -686,7 +721,7 @@ def build_app() -> gr.Blocks:
                     inputs=[
                         mesh_state, shoebox_state, curved_sub, curved_layer_h,
                         curved_spacing, tau_min, tau_max, flatness_w, smoothness_w,
-                        z_target, use_target, curved_backend,
+                        z_target, use_target, curved_backend, path_strategy, fiber_angle,
                     ],
                     outputs=[
                         curved_plot, curved_stats, curved_obj, curved_gcode_file,
