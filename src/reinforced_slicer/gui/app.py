@@ -30,6 +30,7 @@ from reinforced_slicer.gui.gcode_stats import parse_gcode_stats
 from reinforced_slicer.gui.serialize import (
     CurvedSliceArtifacts,
     PlanarSliceArtifacts,
+    comparison_summary_markdown,
     curved_layer_stats,
     curved_layers_plotly,
     export_iso_surfaces_obj,
@@ -38,6 +39,7 @@ from reinforced_slicer.gui.serialize import (
     mesh_stats,
     planar_slice_plotly,
     planar_slice_stats,
+    side_by_side_plotly,
 )
 from reinforced_slicer.gui.tetmesh_from_stl import (
     ShoeboxTetMesh,
@@ -234,11 +236,21 @@ def _replot_curved(state, lo_pct: float, hi_pct: float):
     n = len(iso)
     if n == 0:
         return None
+    return curved_layers_plotly(
+        iso, oriented, show_normals_every=12,
+        layer_range=_pct_to_range(iso, lo_pct, hi_pct),
+    )
+
+
+def _pct_to_range(iso, lo_pct: float, hi_pct: float) -> tuple[int, int]:
+    n = len(iso)
+    if n == 0:
+        return (0, 0)
     lo = int(round(lo_pct / 100.0 * (n - 1)))
     hi = int(round(hi_pct / 100.0 * (n - 1)))
     if hi < lo:
         lo, hi = hi, lo
-    return curved_layers_plotly(iso, oriented, show_normals_every=12, layer_range=(lo, hi))
+    return lo, hi
 
 
 def _replan_paths_for_viz(iso_layers, spacing: float):
@@ -254,6 +266,67 @@ def _replan_paths_for_viz(iso_layers, spacing: float):
 
 
 # --- Tab 4: kinematics inspector ----------------------------------------
+
+
+def _run_comparison(
+    mesh: trimesh.Trimesh | None,
+    shoebox: ShoeboxTetMesh | None,
+    subdivisions: int,
+    planar_layer_h: float,
+    planar_spacing: float,
+    curved_layer_h: float,
+    curved_spacing: float,
+    arrow_density: int,
+):
+    if mesh is None and shoebox is None:
+        return None, "Load a mesh first (Tab 1).", "", ""
+
+    # Planar pipeline.
+    part = slice_planar(
+        mesh if mesh is not None else _shoebox_surface_mesh(shoebox),
+        PlanarSliceConfig(
+            layer_height=float(planar_layer_h),
+            infill_spacing=float(planar_spacing),
+        ),
+    )
+    planar_path = _WORK_DIR / "compare_planar.gcode"
+    write_gcode(part, planar_path, GcodeConfig())
+
+    # Curved pipeline.
+    if shoebox is None:
+        shoebox = shoebox_tet_mesh_from_stl(mesh, subdivisions=int(subdivisions))
+    machine = AcTableMachine()
+    curved = curved_layer_5axis_pipeline(
+        shoebox.mesh,
+        shoebox.top_indices,
+        shoebox.bottom_indices,
+        machine,
+        layer_height=float(curved_layer_h),
+        path_spacing=float(curved_spacing),
+    )
+    curved_path = _WORK_DIR / "compare_curved.gcode"
+    curved_path.write_text(curved.gcode)
+    iso_layers = extract_curved_layers(shoebox.mesh, curved.field, layer_height=float(curved_layer_h))
+    oriented = _replan_paths_for_viz(iso_layers, float(curved_spacing))
+
+    fig = side_by_side_plotly(part, iso_layers, oriented, show_normals_every=int(arrow_density))
+
+    summary = comparison_summary_markdown(
+        planar_stats=planar_slice_stats(part),
+        curved_stats=curved_layer_stats(curved),
+        planar_print=parse_gcode_stats(planar_path.read_text()).to_dict(),
+        curved_print=parse_gcode_stats(curved.gcode).to_dict(),
+    )
+    return fig, summary, str(planar_path), str(curved_path)
+
+
+def _shoebox_surface_mesh(shoebox: ShoeboxTetMesh) -> trimesh.Trimesh:
+    """Build a box surface mesh for cases where we only have the shoebox."""
+    ox, oy, oz = shoebox.origin_mm
+    ex, ey, ez = shoebox.extent_mm
+    return trimesh.creation.box(extents=(ex, ey, ez)).apply_translation(
+        (ox + ex / 2.0, oy + ey / 2.0, oz + ez / 2.0)
+    )
 
 
 def _run_kinematics_sweep(
@@ -471,6 +544,12 @@ def build_app() -> gr.Blocks:
                             smoothness_w = gr.Slider(1e-6, 1e-1, value=1e-4, step=1e-5, label="Smoothness weight")
                             use_target = gr.Checkbox(value=False, label="Override z_target")
                             z_target = gr.Slider(0.0, 100.0, value=20.0, step=0.5, label="z_target (mm)")
+                        with gr.Group():
+                            gr.Markdown("**Visualisation**")
+                            arrow_every = gr.Slider(
+                                0, 40, value=12, step=1,
+                                label="Tool-axis arrow every N path points (0 = off)",
+                            )
                         curved_btn = gr.Button("Slice (curved 5-axis)", variant="primary")
                     with gr.Column(scale=2):
                         curved_plot = gr.Plot(label="Curved layers + paths + sampled tool axes")
@@ -496,18 +575,69 @@ def build_app() -> gr.Blocks:
                         curved_gcode_preview, curved_state, curved_lo, curved_hi,
                     ],
                 )
+
+                def _replot_curved_with_arrows(state, lo, hi, every):
+                    if not state:
+                        return None
+                    return curved_layers_plotly(
+                        state["iso"], state["oriented"],
+                        show_normals_every=int(every),
+                        layer_range=_pct_to_range(state["iso"], lo, hi),
+                    )
+
                 curved_lo.release(
-                    _replot_curved,
-                    inputs=[curved_state, curved_lo, curved_hi],
+                    _replot_curved_with_arrows,
+                    inputs=[curved_state, curved_lo, curved_hi, arrow_every],
                     outputs=[curved_plot],
                 )
                 curved_hi.release(
-                    _replot_curved,
-                    inputs=[curved_state, curved_lo, curved_hi],
+                    _replot_curved_with_arrows,
+                    inputs=[curved_state, curved_lo, curved_hi, arrow_every],
+                    outputs=[curved_plot],
+                )
+                arrow_every.release(
+                    _replot_curved_with_arrows,
+                    inputs=[curved_state, curved_lo, curved_hi, arrow_every],
                     outputs=[curved_plot],
                 )
 
-            with gr.Tab("4. Kinematics inspector"):
+            with gr.Tab("4. Compare 3-axis vs 5-axis"):
+                gr.Markdown(
+                    "Slice the loaded mesh with both pipelines using shared parameters; "
+                    "see them side-by-side and compare the print-stats."
+                )
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        with gr.Group():
+                            gr.Markdown("**Shared**")
+                            cmp_sub = gr.Slider(2, 6, value=4, step=1, label="Shoebox subdivisions")
+                        with gr.Group():
+                            gr.Markdown("**Planar**")
+                            cmp_planar_h = gr.Slider(0.1, 2.0, value=0.5, step=0.05, label="Layer height (mm)")
+                            cmp_planar_sp = gr.Slider(0.1, 2.0, value=0.6, step=0.05, label="Infill spacing (mm)")
+                        with gr.Group():
+                            gr.Markdown("**Curved**")
+                            cmp_curved_h = gr.Slider(0.5, 5.0, value=1.5, step=0.1, label="Layer height (mm)")
+                            cmp_curved_sp = gr.Slider(0.3, 3.0, value=1.2, step=0.1, label="Path spacing (mm)")
+                            cmp_arrows = gr.Slider(0, 40, value=16, step=1, label="Tool-axis arrow every N points")
+                        cmp_btn = gr.Button("Run side-by-side", variant="primary")
+                    with gr.Column(scale=2):
+                        cmp_plot = gr.Plot(label="3-axis (left) · 5-axis curved (right)")
+                        cmp_summary = gr.Markdown("*Run the comparison to populate.*")
+                        with gr.Row():
+                            cmp_planar_file = gr.File(label="Planar G-code", interactive=False)
+                            cmp_curved_file = gr.File(label="Curved 5-axis G-code", interactive=False)
+
+                cmp_btn.click(
+                    _run_comparison,
+                    inputs=[
+                        mesh_state, shoebox_state, cmp_sub,
+                        cmp_planar_h, cmp_planar_sp, cmp_curved_h, cmp_curved_sp, cmp_arrows,
+                    ],
+                    outputs=[cmp_plot, cmp_summary, cmp_planar_file, cmp_curved_file],
+                )
+
+            with gr.Tab("5. Kinematics inspector"):
                 gr.Markdown(
                     "Drive synthetic tool-axis trajectories through the AC-table machine. "
                     "Useful for probing IK branch continuity and the GLT-2015 singularity smoother."

@@ -394,3 +394,118 @@ class CurvedSliceArtifacts:
     layers_obj_path: Path
     plotly_fig: Any
     stats: dict[str, Any]
+
+
+def side_by_side_plotly(
+    part: SlicedPart,
+    iso_layers: list[IsoSurface],
+    oriented_layers: list[OrientedLayer],
+    show_normals_every: int = 16,
+) -> dict[str, Any]:
+    """Side-by-side comparison: planar paths (left) vs curved layers (right)."""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        specs=[[{"type": "scene"}, {"type": "scene"}]],
+        subplot_titles=("3-axis planar", "5-axis curved layers"),
+        horizontal_spacing=0.02,
+    )
+
+    n_planar = len(part.layers)
+    for li, layer in enumerate(part.layers):
+        colour = _layer_colour(li, n_planar)
+        for poly in layer.paths:
+            fig.add_trace(
+                go.Scatter3d(
+                    x=poly[:, 0], y=poly[:, 1],
+                    z=np.full(len(poly), layer.z),
+                    mode="lines",
+                    line={"color": colour, "width": 2},
+                    showlegend=False, hoverinfo="skip",
+                ),
+                row=1, col=1,
+            )
+
+    n_curved = len(iso_layers)
+    for li, iso in enumerate(iso_layers):
+        if iso.is_empty():
+            continue
+        colour = _layer_colour(li, n_curved)
+        fig.add_trace(
+            go.Mesh3d(
+                x=iso.vertices[:, 0], y=iso.vertices[:, 1], z=iso.vertices[:, 2],
+                i=iso.triangles[:, 0], j=iso.triangles[:, 1], k=iso.triangles[:, 2],
+                color=colour, opacity=0.4,
+                showscale=False, hoverinfo="skip",
+            ),
+            row=1, col=2,
+        )
+    for li, paths in enumerate(oriented_layers):
+        colour = _layer_colour(li, max(n_curved, 1))
+        for path in paths:
+            if not path:
+                continue
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[p.position[0] for p in path],
+                    y=[p.position[1] for p in path],
+                    z=[p.position[2] for p in path],
+                    mode="lines",
+                    line={"color": colour, "width": 3},
+                    showlegend=False, hoverinfo="skip",
+                ),
+                row=1, col=2,
+            )
+            if show_normals_every > 0:
+                norm_len = 0.04 * _layer_scale(iso_layers)
+                arrow_x: list[float] = []
+                arrow_y: list[float] = []
+                arrow_z: list[float] = []
+                for idx in range(0, len(path), show_normals_every):
+                    pose = path[idx]
+                    tip = pose.position + norm_len * pose.tool_axis
+                    arrow_x.extend([pose.position[0], tip[0], None])
+                    arrow_y.extend([pose.position[1], tip[1], None])
+                    arrow_z.extend([pose.position[2], tip[2], None])
+                if arrow_x:
+                    fig.add_trace(
+                        go.Scatter3d(
+                            x=arrow_x, y=arrow_y, z=arrow_z,
+                            mode="lines",
+                            line={"color": "black", "width": 2},
+                            showlegend=False, hoverinfo="skip",
+                        ),
+                        row=1, col=2,
+                    )
+
+    fig.update_layout(
+        scene={"aspectmode": "data"},
+        scene2={"aspectmode": "data"},
+        margin={"l": 0, "r": 0, "t": 30, "b": 0},
+        height=640,
+    )
+    return fig
+
+
+def comparison_summary_markdown(
+    planar_stats: dict[str, Any],
+    curved_stats: dict[str, Any],
+    planar_print: dict[str, Any],
+    curved_print: dict[str, Any],
+) -> str:
+    """Markdown table comparing the two pipelines."""
+    rows = [
+        ("Layers", planar_stats.get("n_layers"), curved_stats.get("n_layers")),
+        ("Path points", planar_stats.get("n_path_points"), curved_stats.get("n_path_points")),
+        ("Print time", planar_print.get("print_time"), curved_print.get("print_time")),
+        ("Total time", planar_print.get("total_time"), curved_print.get("total_time")),
+        ("Print distance (mm)", planar_print.get("print_distance_mm"), curved_print.get("print_distance_mm")),
+        ("Travel distance (mm)", planar_print.get("travel_distance_mm"), curved_print.get("travel_distance_mm")),
+        ("Filament (m)", planar_print.get("filament_used_m"), curved_print.get("filament_used_m")),
+    ]
+    lines = ["| Metric | 3-axis planar | 5-axis curved |", "|---|---|---|"]
+    for name, a, b in rows:
+        lines.append(f"| **{name}** | {a if a is not None else '—'} | {b if b is not None else '—'} |")
+    return "\n".join(lines)
