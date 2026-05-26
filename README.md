@@ -21,7 +21,7 @@ This project tries to fill the gap: a Python, permissively-licensed, end-to-end 
 | M2b  | TetMesh primitives + Kuhn-triangulation synthetic mesher | ✅ |
 | M2c  | 3D CurviSlicer + marching tets + curved paths + end-to-end pipeline | ✅ |
 | GUI  | Gradio frontend with 4 workflow tabs | ✅ |
-| M3   | Real STL tetrahedralisation (replaces shoebox approximation) | planned |
+| M3   | Real STL tetrahedralisation via LGPL `gmsh` (`[tet]` extra) | ✅ |
 | M4   | 2-RoSy direction field + stripe-pattern paths for fiber alignment | planned |
 | M5   | Real FEA backend (stress field input to QP) | planned |
 | M6+  | High-density fiber paths (Fang 2024), winding around holes, multi-material | planned |
@@ -50,7 +50,7 @@ pytest
 A browser-based UI ships as an optional extra:
 
 ```bash
-pip install -e ".[dev,gui]"
+pip install -e ".[dev,gui,tet]"              # tet adds LGPL gmsh for real STL meshing
 reinforced-slicer-gui --no-browser           # serves on http://127.0.0.1:7860
 reinforced-slicer-gui --share                # public tunnelled URL (72h)
 ```
@@ -62,7 +62,7 @@ Tabs run in workflow order:
 3. **Curved layer (5-axis)** — full M2c pipeline (CurviSlicer QP → iso-surfaces → paths-on-surfaces → 5-axis G-code through the AC-table kinematics). Plots curved layer surfaces with overlaid tool paths and sampled tool-axis arrows.
 4. **Kinematics inspector** — sweep a tool-axis trajectory through the AC-table machine; plots rotary trajectory and singularity distance, with toggleable GLT-2015 smoothing.
 
-> **Curved-layer pipeline caveat:** uploaded STLs are currently treated as their AABB shoebox (real STL tetrahedralisation is deferred — see [src/reinforced_slicer/mesh/__init__.py](src/reinforced_slicer/mesh/__init__.py) for the licence situation). Use the synthetic-cube generator on Tab 1 to exercise the full algorithm faithfully.
+> **Curved-layer pipeline:** by default uploaded STLs are tetrahedralised via the LGPL `gmsh` backend (install with the `[tet]` extra). Without that, the GUI falls back to an AABB shoebox approximation; the synthetic-cube generator on Tab 1 always uses the synthetic Kuhn-triangulation. See [src/reinforced_slicer/mesh/__init__.py](src/reinforced_slicer/mesh/__init__.py) for the backend-selection details.
 
 ## Repo layout
 

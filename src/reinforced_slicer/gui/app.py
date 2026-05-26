@@ -52,6 +52,7 @@ from reinforced_slicer.kinematics import (
     detect_singular_segments,
     smooth_singularities,
 )
+from reinforced_slicer.mesh.tetmesh_backends import available_backends
 from reinforced_slicer.mesh.isosurface import extract_curved_layers
 from reinforced_slicer.postproc.gcode import GcodeConfig, write_gcode
 from reinforced_slicer.postproc.gcode_5axis import write_gcode_5axis
@@ -168,12 +169,13 @@ def _make_synthetic_cube(extent: float, subdivisions: int, tilt_slope: float):
 
 
 def _shoebox_to_surface_mesh(shoebox: ShoeboxTetMesh) -> trimesh.Trimesh:
-    """Build a triangle surface mesh of the shoebox so it can be visualised
-    via Model3D and used as an STL placeholder."""
-    ox, oy, oz = shoebox.origin_mm
-    ex, ey, ez = shoebox.extent_mm
-    return trimesh.creation.box(extents=(ex, ey, ez)).apply_translation(
-        (ox + ex / 2.0, oy + ey / 2.0, oz + ez / 2.0)
+    """Build a triangle surface mesh of the tet mesh's AABB for Model3D preview."""
+    verts = shoebox.mesh.vertices
+    lo = verts.min(axis=0)
+    hi = verts.max(axis=0)
+    extents = hi - lo
+    return trimesh.creation.box(extents=tuple(extents)).apply_translation(
+        tuple(lo + extents / 2.0)
     )
 
 
@@ -252,6 +254,7 @@ def _run_curved_slice(
     smoothness_weight: float,
     z_target_override: float,
     use_z_target_override: bool,
+    backend: str = "auto",
     progress=gr.Progress(),
 ):
     if mesh is None and shoebox is None:
@@ -262,8 +265,19 @@ def _run_curved_slice(
         )
 
     progress(0.05, desc="Preparing tet mesh")
+    # Re-mesh whenever the user explicitly picks a backend (otherwise the
+    # cached synthetic-cube shoebox wins regardless of the choice).
+    if mesh is not None and backend in ("auto", "gmsh", "shoebox"):
+        # Use the real backend on uploaded STLs; only keep the cached
+        # synthetic cube when nothing else is loaded.
+        if shoebox is None or shoebox.backend == "shoebox" and backend != "shoebox":
+            shoebox = shoebox_tet_mesh_from_stl(
+                mesh, subdivisions=int(subdivisions), backend=backend  # type: ignore[arg-type]
+            )
     if shoebox is None:
-        shoebox = shoebox_tet_mesh_from_stl(mesh, subdivisions=int(subdivisions))
+        shoebox = shoebox_tet_mesh_from_stl(
+            mesh, subdivisions=int(subdivisions), backend=backend  # type: ignore[arg-type]
+        )
 
     cfg = CurviSlicer3DConfig(
         tau_min=float(tau_min),
@@ -302,6 +316,8 @@ def _run_curved_slice(
     geo_stats = curved_layer_stats(result)
     print_stats = parse_gcode_stats(result.gcode, default_feed_mm_per_min=1800.0).to_dict()
     summary = (
+        f"### Tet mesh\n- **backend**: `{shoebox.backend}`\n- "
+        f"**tets**: {shoebox.mesh.n_tets}\n- **vertices**: {shoebox.mesh.n_vertices}\n\n"
         "### Pipeline\n" + _format_stats(geo_stats)
         + "\n\n### Print stats (kinematic estimate)\n" + _format_stats(print_stats)
         + f"\n\n*{shoebox.note}*"
@@ -412,12 +428,8 @@ def _run_comparison(
 
 
 def _shoebox_surface_mesh(shoebox: ShoeboxTetMesh) -> trimesh.Trimesh:
-    """Build a box surface mesh for cases where we only have the shoebox."""
-    ox, oy, oz = shoebox.origin_mm
-    ex, ey, ez = shoebox.extent_mm
-    return trimesh.creation.box(extents=(ex, ey, ez)).apply_translation(
-        (ox + ex / 2.0, oy + ey / 2.0, oz + ez / 2.0)
-    )
+    """Build a box surface mesh from the tet mesh's AABB."""
+    return _shoebox_to_surface_mesh(shoebox)
 
 
 def _run_kinematics_sweep(
@@ -622,9 +634,21 @@ def build_app() -> gr.Blocks:
                     with gr.Column(scale=1):
                         with gr.Group():
                             gr.Markdown("**Tet mesh**")
+                            backend_choices = ["auto"] + available_backends() + ["shoebox"]
+                            # Deduplicate while preserving order.
+                            seen: set[str] = set()
+                            backend_choices = [
+                                b for b in backend_choices if not (b in seen or seen.add(b))
+                            ]
+                            curved_backend = gr.Radio(
+                                choices=backend_choices,
+                                value="auto",
+                                label="Tetrahedralisation backend",
+                                info="`auto` picks the best installed; `shoebox` always uses the AABB fallback.",
+                            )
                             curved_sub = gr.Slider(
                                 2, 6, value=4, step=1,
-                                label="Shoebox subdivisions (used if uploading a non-cube)",
+                                label="Shoebox subdivisions (when using the AABB fallback)",
                             )
                         with gr.Group():
                             gr.Markdown("**Layer + path**")
@@ -662,7 +686,7 @@ def build_app() -> gr.Blocks:
                     inputs=[
                         mesh_state, shoebox_state, curved_sub, curved_layer_h,
                         curved_spacing, tau_min, tau_max, flatness_w, smoothness_w,
-                        z_target, use_target,
+                        z_target, use_target, curved_backend,
                     ],
                     outputs=[
                         curved_plot, curved_stats, curved_obj, curved_gcode_file,

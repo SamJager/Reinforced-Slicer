@@ -44,6 +44,7 @@ gui = [
     "gradio>=4.40",
     "plotly>=5.20",
 ]
+tet = ["gmsh>=4.13"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.1",

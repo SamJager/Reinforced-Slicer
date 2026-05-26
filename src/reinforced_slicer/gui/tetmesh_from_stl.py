@@ -1,21 +1,18 @@
 """STL → TetMesh adapter for the GUI.
 
-Real STL tetrahedralisation needs an external mesher (see the licence
-discussion in ``reinforced_slicer/mesh/__init__.py``). Until that lands
-the GUI falls back to a *shoebox* approximation: fit an axis-aligned
-bounding box around the input mesh and tetrahedralise the box itself.
-This is **geometrically wrong** for non-box parts — the curved-layer
-slicer will operate on the AABB, not the real geometry — but it lets
-the whole UI flow exercise end-to-end and prove the pipeline works.
+Thin wrapper around ``reinforced_slicer.mesh.tetrahedralize_surface``
+that also keeps a demo-only ``synthetic_tilted_cube`` constructor for
+the Tab-1 synthetic-cube generator.
 
-Once a real tet mesher is wired up, swap ``shoebox_tet_mesh_from_stl``
-for a real ``tetrahedralise(stl) -> TetMesh`` call; the GUI doesn't
-need to change.
+The GUI deals in ``TetMeshResult`` (from the backend dispatch module)
+rather than the older ``ShoeboxTetMesh``; the two have the same
+slicer-relevant fields (``mesh``, ``top_indices``, ``bottom_indices``,
+``note``) so this is a near-drop-in change.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import trimesh
@@ -26,51 +23,45 @@ from reinforced_slicer.mesh.tet import (
     cube_tet_mesh,
     top_face_indices,
 )
+from reinforced_slicer.mesh.tetmesh_backends import (
+    TetMeshResult,
+    tetrahedralize_surface,
+)
 
 
-@dataclass(frozen=True)
-class ShoeboxTetMesh:
-    """A cube-from-AABB tet mesh plus the top/bottom index sets."""
-
-    mesh: TetMesh
-    top_indices: np.ndarray
-    bottom_indices: np.ndarray
-    extent_mm: tuple[float, float, float]
-    origin_mm: tuple[float, float, float]
-    subdivisions: int
-    note: str
+# Backwards-compatible alias used by existing GUI code.
+ShoeboxTetMesh = TetMeshResult
 
 
 def shoebox_tet_mesh_from_stl(
-    stl_mesh: trimesh.Trimesh, subdivisions: int = 4
-) -> ShoeboxTetMesh:
-    """Fit an AABB to ``stl_mesh`` and tetrahedralise the box."""
-    bounds = stl_mesh.bounds
-    origin = tuple(float(x) for x in bounds[0])
-    extent_xyz = tuple(float(x) for x in (bounds[1] - bounds[0]))
-    extent = float(max(extent_xyz))
-    mesh = cube_tet_mesh(extent=extent, subdivisions=subdivisions, origin=origin)
-    note = (
-        "Shoebox approximation: curved-layer pipeline operates on the AABB "
-        "of the uploaded mesh, not the real geometry. Swap in a real tet "
-        "mesher when available."
-    )
-    return ShoeboxTetMesh(
-        mesh=mesh,
-        top_indices=top_face_indices(subdivisions),
-        bottom_indices=bottom_face_indices(subdivisions),
-        extent_mm=extent_xyz,
-        origin_mm=origin,
-        subdivisions=subdivisions,
-        note=note,
-    )
+    stl_mesh: trimesh.Trimesh,
+    subdivisions: int = 4,
+    backend: Literal["auto", "gmsh", "shoebox"] = "auto",
+) -> TetMeshResult:
+    """Tetrahedralise ``stl_mesh`` using the best available backend.
+
+    The default ``backend="auto"`` picks the real ``gmsh`` mesher when
+    available and falls back to a Kuhn-triangulation of the AABB
+    shoebox when no real backend is installed. Pass ``backend="shoebox"``
+    explicitly to force the fallback even when gmsh is available — useful
+    for benchmarking or for cases where the real mesher chokes on
+    non-watertight inputs.
+
+    ``subdivisions`` is honoured by the shoebox backend only; the real
+    backend's resolution is controlled via ``tetrahedralize_surface``'s
+    ``target_size_mm`` argument (this wrapper picks a default based on
+    the AABB diagonal).
+    """
+    if backend == "shoebox":
+        return tetrahedralize_surface(stl_mesh, backend="shoebox")
+    return tetrahedralize_surface(stl_mesh, backend=backend)
 
 
 def synthetic_tilted_cube(
     extent: float = 10.0,
     subdivisions: int = 4,
     tilt_slope_x: float = 0.0,
-) -> ShoeboxTetMesh:
+) -> TetMeshResult:
     """Build a synthetic cube with optional tilted top — the demo mesh.
 
     With ``tilt_slope_x != 0`` the top-face vertices get a linear ramp
@@ -80,15 +71,20 @@ def synthetic_tilted_cube(
     """
     mesh = cube_tet_mesh(extent=extent, subdivisions=subdivisions)
     if abs(tilt_slope_x) < 1e-12:
-        note = "Synthetic axis-aligned cube."
-        return ShoeboxTetMesh(
+        top = top_face_indices(subdivisions)
+        bottom = bottom_face_indices(subdivisions)
+        is_surface = np.zeros(mesh.n_vertices, dtype=bool)
+        for idx in np.concatenate(
+            [top, bottom, _side_face_indices(subdivisions)]
+        ):
+            is_surface[idx] = True
+        return TetMeshResult(
             mesh=mesh,
-            top_indices=top_face_indices(subdivisions),
-            bottom_indices=bottom_face_indices(subdivisions),
-            extent_mm=(extent, extent, extent),
-            origin_mm=(0.0, 0.0, 0.0),
-            subdivisions=subdivisions,
-            note=note,
+            top_indices=top,
+            bottom_indices=bottom,
+            backend="shoebox",
+            note="Synthetic axis-aligned cube.",
+            is_surface_vertex=is_surface,
         )
 
     s = subdivisions
@@ -104,13 +100,30 @@ def synthetic_tilted_cube(
                 idx = i + j * n + k * n * n
                 perturbed[idx, 2] = (k / s) * new_top_z
     tilted = TetMesh(vertices=perturbed, tets=mesh.tets)
-    note = f"Synthetic cube with tilted top (slope_x = {tilt_slope_x})."
-    return ShoeboxTetMesh(
+    bottom = bottom_face_indices(s)
+    is_surface = np.zeros(tilted.n_vertices, dtype=bool)
+    for idx in np.concatenate([top, bottom, _side_face_indices(s)]):
+        is_surface[idx] = True
+    return TetMeshResult(
         mesh=tilted,
         top_indices=top,
-        bottom_indices=bottom_face_indices(s),
-        extent_mm=(extent, extent, extent),
-        origin_mm=(0.0, 0.0, 0.0),
-        subdivisions=subdivisions,
-        note=note,
+        bottom_indices=bottom,
+        backend="shoebox",
+        note=f"Synthetic cube with tilted top (slope_x = {tilt_slope_x}).",
+        is_surface_vertex=is_surface,
     )
+
+
+def _side_face_indices(s: int) -> np.ndarray:
+    """Vertices on the four non-top/bottom faces of a cube_tet_mesh."""
+    n = s + 1
+    idxs: list[int] = []
+    for k in range(n):
+        for j in range(n):
+            for i in range(n):
+                on_x = i == 0 or i == s
+                on_y = j == 0 or j == s
+                if on_x or on_y:
+                    idxs.append(k * n * n + j * n + i)
+    return np.array(idxs, dtype=int)
+
