@@ -7,7 +7,9 @@ from pathlib import Path
 
 import trimesh
 
+from reinforced_slicer.kinematics import AcTableMachine
 from reinforced_slicer.postproc.gcode import GcodeConfig, write_gcode
+from reinforced_slicer.postproc.gcode_5axis import write_gcode_5axis
 from reinforced_slicer.slicing.planar import PlanarSliceConfig, slice_planar
 
 
@@ -23,6 +25,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--infill-angle", type=float, default=45.0)
     parser.add_argument("--nozzle-temp", type=int, default=210)
     parser.add_argument("--bed-temp", type=int, default=60)
+    parser.add_argument(
+        "--five-axis",
+        action="store_true",
+        help="Emit 5-axis G-code routed through an AC-table machine model "
+        "(tool axis is vertical, so A=C=0 throughout; useful as a seam check).",
+    )
     args = parser.parse_args(argv)
 
     mesh = trimesh.load(args.input, force="mesh")
@@ -37,8 +45,12 @@ def main(argv: list[str] | None = None) -> int:
     gcode_cfg = GcodeConfig(nozzle_temp_c=args.nozzle_temp, bed_temp_c=args.bed_temp)
 
     part = slice_planar(mesh, slice_cfg)
-    out_path = write_gcode(part, args.output, gcode_cfg)
-    print(f"Wrote {len(part.layers)} layers to {out_path}")
+    if args.five_axis:
+        machine = AcTableMachine()
+        write_gcode_5axis(part, machine, gcode_cfg, path=args.output)
+    else:
+        write_gcode(part, args.output, gcode_cfg)
+    print(f"Wrote {len(part.layers)} layers to {args.output}")
     return 0
 
 
