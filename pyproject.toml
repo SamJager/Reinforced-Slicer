@@ -40,6 +40,10 @@ dependencies = [
 [project.optional-dependencies]
 viz = ["pyvista>=0.43"]
 kinematics = ["yourdfpy>=0.0.56"]
+gui = [
+    "gradio>=4.40",
+    "plotly>=5.20",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=4.1",
@@ -49,6 +53,7 @@ dev = [
 
 [project.scripts]
 reinforced-slicer = "reinforced_slicer.cli:main"
+reinforced-slicer-gui = "reinforced_slicer.gui.launcher:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/reinforced_slicer"]
