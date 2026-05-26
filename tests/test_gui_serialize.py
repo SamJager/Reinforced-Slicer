@@ -188,7 +188,7 @@ class TestHandlerIntegration:
     def test_planar_slice_handler_runs_end_to_end(self, cube: trimesh.Trimesh) -> None:
         from reinforced_slicer.gui.app import _run_planar_slice
 
-        fig, summary, gcode_path, preview = _run_planar_slice(
+        result = _run_planar_slice(
             cube,
             layer_height=1.0,
             infill_spacing=0.8,
@@ -197,6 +197,7 @@ class TestHandlerIntegration:
             nozzle_temp=210,
             bed_temp=60,
         )
+        fig, summary, gcode_path, preview, *_ = result
         assert fig is not None
         assert "n_layers" in summary
         assert Path(gcode_path).exists()
@@ -206,7 +207,7 @@ class TestHandlerIntegration:
         from reinforced_slicer.gui.app import _make_synthetic_cube, _run_curved_slice
 
         _, _, _, _, shoebox = _make_synthetic_cube(extent=10.0, subdivisions=3, tilt_slope=0.3)
-        fig, summary, obj_path, gcode_path, preview = _run_curved_slice(
+        result = _run_curved_slice(
             mesh=None,
             shoebox=shoebox,
             subdivisions=3,
@@ -219,6 +220,7 @@ class TestHandlerIntegration:
             z_target_override=10.0,
             use_z_target_override=False,
         )
+        fig, summary, obj_path, gcode_path, preview, *_ = result
         assert fig is not None
         assert "n_layers" in summary
         assert Path(obj_path).exists()
@@ -228,13 +230,14 @@ class TestHandlerIntegration:
     def test_curved_slice_handler_handles_missing_mesh(self) -> None:
         from reinforced_slicer.gui.app import _run_curved_slice
 
-        fig, summary, obj_path, gcode_path, preview = _run_curved_slice(
+        result = _run_curved_slice(
             mesh=None, shoebox=None,
             subdivisions=3, layer_height=2.0, path_spacing=2.0,
             tau_min=0.5, tau_max=2.0,
             flatness_weight=1.0, smoothness_weight=1e-4,
             z_target_override=10.0, use_z_target_override=False,
         )
+        fig, summary, *_ = result
         assert fig is None
         assert "Load a mesh first" in summary
 

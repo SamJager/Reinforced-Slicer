@@ -28,9 +28,28 @@ OrientedLayer = list[list[CutterPose]]
 
 
 def mesh_stats(mesh: trimesh.Trimesh) -> dict[str, Any]:
-    """Basic geometry stats for a triangle mesh."""
+    """Geometry and quality stats for a triangle mesh.
+
+    Slicer-relevant quality flags:
+    - ``watertight``: every edge is shared by exactly two faces. Required
+      for reliable planar slicing.
+    - ``n_open_edges``: edges shared by < 2 faces (holes / boundaries).
+    - ``n_non_manifold_edges``: edges shared by > 2 faces (corrupt geometry).
+    - ``n_broken_faces``: faces with zero area.
+    - ``slicing_ready``: composite — watertight, manifold, no broken faces.
+    """
     bounds = mesh.bounds
     extent = bounds[1] - bounds[0]
+    n_open_edges = _count_edges_with_multiplicity(mesh, multiplicity=1)
+    n_non_manifold_edges = _count_edges_with_multiplicity(mesh, multiplicity=3, at_least=True)
+    n_broken = int(len(getattr(mesh, "broken_faces", []) or []))
+
+    watertight = bool(mesh.is_watertight)
+    is_winding_consistent = bool(getattr(mesh, "is_winding_consistent", True))
+    slicing_ready = (
+        watertight and is_winding_consistent and n_broken == 0 and n_non_manifold_edges == 0
+    )
+
     return {
         "n_vertices": int(len(mesh.vertices)),
         "n_faces": int(len(mesh.faces)),
@@ -38,8 +57,59 @@ def mesh_stats(mesh: trimesh.Trimesh) -> dict[str, Any]:
         "bbox_min_mm": [round(float(x), 3) for x in bounds[0]],
         "bbox_max_mm": [round(float(x), 3) for x in bounds[1]],
         "volume_mm3": round(float(mesh.volume), 3) if mesh.is_volume else None,
-        "watertight": bool(mesh.is_watertight),
+        "watertight": watertight,
+        "winding_consistent": is_winding_consistent,
+        "n_open_edges": n_open_edges,
+        "n_non_manifold_edges": n_non_manifold_edges,
+        "n_broken_faces": n_broken,
+        "slicing_ready": slicing_ready,
     }
+
+
+def _count_edges_with_multiplicity(mesh: trimesh.Trimesh, multiplicity: int, at_least: bool = False) -> int:
+    """Count edges shared by exactly (or at least) ``multiplicity`` faces.
+
+    Uses trimesh's edge grouping. ``at_least=True`` includes higher counts —
+    use it for non-manifold detection (3+ faces sharing an edge).
+    """
+    try:
+        edges_sorted = mesh.edges_sorted
+        # Group identical edge rows.
+        from collections import Counter
+
+        counts = Counter(map(tuple, edges_sorted))
+        if at_least:
+            return sum(1 for v in counts.values() if v >= multiplicity)
+        return sum(1 for v in counts.values() if v == multiplicity)
+    except Exception:
+        return 0
+
+
+def mesh_quality_warning(stats: dict[str, Any]) -> str | None:
+    """Return a markdown warning string if ``stats`` flag mesh issues.
+
+    Returns ``None`` for a clean mesh — callers can hide the warning panel.
+    """
+    issues: list[str] = []
+    if not stats.get("watertight", True):
+        issues.append(
+            f"**Not watertight** — {stats.get('n_open_edges', 0)} open edges. "
+            "Planar slicing may produce gaps; curved-layer pipeline runs on the "
+            "AABB so this matters less but the input geometry is still off."
+        )
+    if not stats.get("winding_consistent", True):
+        issues.append(
+            "**Winding inconsistent** — face normals point in incompatible "
+            "directions. Try `trimesh.repair.fix_normals` on the input."
+        )
+    if stats.get("n_broken_faces", 0) > 0:
+        issues.append(
+            f"**{stats['n_broken_faces']} broken (zero-area) faces.** "
+            "Run `trimesh.repair.fix_inversion` and `mesh.update_faces(mesh.unique_faces())`."
+        )
+    if not issues:
+        return None
+    return "⚠️ Mesh quality warnings:\n\n" + "\n\n".join(f"- {x}" for x in issues)
 
 
 # --- Planar slice export -------------------------------------------------
@@ -60,13 +130,27 @@ def planar_slice_stats(part: SlicedPart) -> dict[str, Any]:
     }
 
 
-def planar_slice_plotly(part: SlicedPart, max_layers: int | None = 30) -> dict[str, Any]:
-    """Return a plotly Figure (as dict) showing per-layer paths in 3D."""
+def planar_slice_plotly(
+    part: SlicedPart,
+    max_layers: int | None = 60,
+    layer_range: tuple[int, int] | None = None,
+) -> dict[str, Any]:
+    """Return a plotly Figure showing per-layer paths in 3D.
+
+    ``layer_range`` is an inclusive ``(lo, hi)`` index pair in the original
+    layer ordering — pass ``(0, N-1)`` for the full stack, ``(i, i)`` for a
+    single layer. ``max_layers`` then downsamples the selection further so
+    huge ranges still render quickly.
+    """
     import plotly.graph_objects as go
 
     layers = part.layers
+    if layer_range is not None:
+        lo, hi = layer_range
+        lo = max(0, int(lo))
+        hi = min(len(layers) - 1, int(hi))
+        layers = layers[lo : hi + 1]
     if max_layers is not None and len(layers) > max_layers:
-        # Downsample uniformly so the plot stays responsive.
         idx = np.linspace(0, len(layers) - 1, max_layers).astype(int)
         layers = [layers[i] for i in idx]
 
@@ -134,14 +218,31 @@ def curved_layers_plotly(
     layers: list[IsoSurface],
     oriented_layers: list[OrientedLayer],
     show_normals_every: int = 12,
+    layer_range: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
-    """Plotly figure: curved-layer surfaces + tool paths + sample tool axes."""
+    """Plotly figure: curved-layer surfaces + tool paths + sample tool axes.
+
+    ``layer_range`` filters the visible layers as in ``planar_slice_plotly``;
+    pass ``None`` to show all layers.
+    """
     import plotly.graph_objects as go
 
     traces: list[go.BaseTraceType] = []
-    n_layers = len(layers)
+    n_layers_total = len(layers)
+
+    if layer_range is not None:
+        lo, hi = layer_range
+        lo = max(0, int(lo))
+        hi = min(n_layers_total - 1, int(hi))
+        visible = set(range(lo, hi + 1))
+    else:
+        visible = set(range(n_layers_total))
+
+    n_layers = n_layers_total  # keep colours stable across filterings
 
     for li, iso in enumerate(layers):
+        if li not in visible:
+            continue
         if iso.is_empty():
             continue
         colour = _layer_colour(li, n_layers)
@@ -163,6 +264,8 @@ def curved_layers_plotly(
         )
 
     for li, paths in enumerate(oriented_layers):
+        if li not in visible:
+            continue
         colour = _layer_colour(li, max(n_layers, 1))
         for path in paths:
             if not path:

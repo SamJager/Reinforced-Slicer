@@ -26,6 +26,7 @@ import gradio as gr
 import numpy as np
 import trimesh
 
+from reinforced_slicer.gui.gcode_stats import parse_gcode_stats
 from reinforced_slicer.gui.serialize import (
     CurvedSliceArtifacts,
     PlanarSliceArtifacts,
@@ -33,6 +34,7 @@ from reinforced_slicer.gui.serialize import (
     curved_layers_plotly,
     export_iso_surfaces_obj,
     joint_trajectory_plotly,
+    mesh_quality_warning,
     mesh_stats,
     planar_slice_plotly,
     planar_slice_stats,
@@ -110,9 +112,13 @@ def _run_planar_slice(
     alternate_angle: bool,
     nozzle_temp: int,
     bed_temp: int,
-) -> tuple[Any, str, Any, str]:
+):
     if mesh is None:
-        return None, "Load a mesh first (Tab 1).", None, ""
+        empty_slider = gr.update(maximum=1, value=100)
+        return (
+            None, "Load a mesh first (Tab 1).", None, "",
+            None, empty_slider, empty_slider,
+        )
     slice_cfg = PlanarSliceConfig(
         layer_height=float(layer_height),
         infill_spacing=float(infill_spacing),
@@ -124,12 +130,29 @@ def _run_planar_slice(
     gcode_path = _WORK_DIR / "planar.gcode"
     write_gcode(part, gcode_path, gcode_cfg)
     fig = planar_slice_plotly(part)
-    stats = planar_slice_stats(part)
-    summary = _format_stats(stats)
-    artifacts = PlanarSliceArtifacts(
-        gcode_path=gcode_path, plotly_fig=fig, stats=stats
+    geo_stats = planar_slice_stats(part)
+    print_stats = parse_gcode_stats(gcode_path.read_text(), default_feed_mm_per_min=1800.0).to_dict()
+    summary = (
+        "### Geometry\n" + _format_stats(geo_stats)
+        + "\n\n### Print stats (kinematic estimate)\n" + _format_stats(print_stats)
     )
-    return fig, summary, str(gcode_path), _gcode_preview(gcode_path)
+    lo_update = gr.update(maximum=100, value=0)
+    hi_update = gr.update(maximum=100, value=100)
+    return (
+        fig, summary, str(gcode_path), _gcode_preview(gcode_path),
+        part, lo_update, hi_update,
+    )
+
+
+def _replot_planar(part, lo_pct: float, hi_pct: float):
+    if part is None:
+        return None
+    n = len(part.layers)
+    lo = int(round(lo_pct / 100.0 * (n - 1)))
+    hi = int(round(hi_pct / 100.0 * (n - 1)))
+    if hi < lo:
+        lo, hi = hi, lo
+    return planar_slice_plotly(part, layer_range=(lo, hi))
 
 
 # --- Tab 3: curved layer ------------------------------------------------
@@ -147,9 +170,13 @@ def _run_curved_slice(
     smoothness_weight: float,
     z_target_override: float,
     use_z_target_override: bool,
-) -> tuple[Any, str, str, str, str]:
+):
     if mesh is None and shoebox is None:
-        return None, "Load a mesh first (Tab 1).", "", "", ""
+        empty_slider = gr.update(maximum=1, value=100)
+        return (
+            None, "Load a mesh first (Tab 1).", "", "", "",
+            None, empty_slider, empty_slider,
+        )
 
     if shoebox is None:
         shoebox = shoebox_tet_mesh_from_stl(mesh, subdivisions=int(subdivisions))
@@ -172,7 +199,6 @@ def _run_curved_slice(
         curvi_config=cfg,
     )
 
-    # Re-derive iso-surfaces + oriented layers for visualisation (cheap).
     field = result.field
     iso_layers = extract_curved_layers(shoebox.mesh, field, layer_height=float(layer_height))
     oriented_layers = _replan_paths_for_viz(iso_layers, float(path_spacing))
@@ -184,12 +210,35 @@ def _run_curved_slice(
     gcode_path.write_text(result.gcode)
 
     fig = curved_layers_plotly(iso_layers, oriented_layers, show_normals_every=12)
-    stats = curved_layer_stats(result)
+    geo_stats = curved_layer_stats(result)
+    print_stats = parse_gcode_stats(result.gcode, default_feed_mm_per_min=1800.0).to_dict()
     summary = (
-        _format_stats(stats)
+        "### Pipeline\n" + _format_stats(geo_stats)
+        + "\n\n### Print stats (kinematic estimate)\n" + _format_stats(print_stats)
         + f"\n\n*{shoebox.note}*"
     )
-    return fig, summary, str(obj_path), str(gcode_path), _gcode_preview(gcode_path, head=120)
+    state = {"iso": iso_layers, "oriented": oriented_layers}
+    lo_update = gr.update(maximum=100, value=0)
+    hi_update = gr.update(maximum=100, value=100)
+    return (
+        fig, summary, str(obj_path), str(gcode_path), _gcode_preview(gcode_path, head=120),
+        state, lo_update, hi_update,
+    )
+
+
+def _replot_curved(state, lo_pct: float, hi_pct: float):
+    if not state:
+        return None
+    iso = state["iso"]
+    oriented = state["oriented"]
+    n = len(iso)
+    if n == 0:
+        return None
+    lo = int(round(lo_pct / 100.0 * (n - 1)))
+    hi = int(round(hi_pct / 100.0 * (n - 1)))
+    if hi < lo:
+        lo, hi = hi, lo
+    return curved_layers_plotly(iso, oriented, show_normals_every=12, layer_range=(lo, hi))
 
 
 def _replan_paths_for_viz(iso_layers, spacing: float):
@@ -318,27 +367,41 @@ def build_app() -> gr.Blocks:
 
                     with gr.Column(scale=2):
                         model3d = gr.Model3D(label="3D preview", height=500)
+                        quality_md = gr.Markdown(visible=False)
                         stats_md = gr.Markdown("*No mesh loaded yet.*")
 
                 def on_upload(file_path):
                     mesh, msg, stats, viz_path = _load_uploaded_stl(file_path)
-                    stats_md_val = _format_stats(stats) if stats else "*No stats — load failed.*"
-                    return mesh, msg, stats_md_val, viz_path, None
+                    if stats:
+                        stats_md_val = _format_stats(stats)
+                        warning = mesh_quality_warning(stats)
+                        quality_update = (
+                            gr.update(value=warning, visible=True)
+                            if warning else gr.update(visible=False)
+                        )
+                    else:
+                        stats_md_val = "*No stats — load failed.*"
+                        quality_update = gr.update(visible=False)
+                    return mesh, msg, stats_md_val, viz_path, None, quality_update
 
                 upload.change(
                     on_upload,
                     inputs=[upload],
-                    outputs=[mesh_state, load_status, stats_md, model3d, shoebox_state],
+                    outputs=[mesh_state, load_status, stats_md, model3d, shoebox_state, quality_md],
                 )
 
                 def on_cube(extent, sub, tilt):
                     mesh, msg, stats, viz_path, shoebox = _make_synthetic_cube(extent, sub, tilt)
-                    return mesh, msg, _format_stats(stats), viz_path, shoebox
+                    warning = mesh_quality_warning(stats)
+                    quality_update = (
+                        gr.update(value=warning, visible=True) if warning else gr.update(visible=False)
+                    )
+                    return mesh, msg, _format_stats(stats), viz_path, shoebox, quality_update
 
                 cube_btn.click(
                     on_cube,
                     inputs=[cube_extent, cube_subdiv, cube_tilt],
-                    outputs=[mesh_state, load_status, stats_md, model3d, shoebox_state],
+                    outputs=[mesh_state, load_status, stats_md, model3d, shoebox_state, quality_md],
                 )
 
             with gr.Tab("2. Planar slice (3-axis)"):
@@ -353,16 +416,34 @@ def build_app() -> gr.Blocks:
                         slice_btn = gr.Button("Slice", variant="primary")
                     with gr.Column(scale=2):
                         planar_plot = gr.Plot(label="Layer paths")
+                        with gr.Row():
+                            planar_lo = gr.Slider(0, 100, value=0, step=1, label="Show from layer (%)")
+                            planar_hi = gr.Slider(0, 100, value=100, step=1, label="… up to layer (%)")
                         planar_stats = gr.Markdown("*Slice a mesh to see stats.*")
                         planar_gcode_file = gr.File(label="Download G-code", interactive=False)
                         planar_gcode_preview = gr.Code(
                             label="G-code preview", language=None, lines=12
                         )
 
+                planar_part_state = gr.State(value=None)
+
                 slice_btn.click(
                     _run_planar_slice,
                     inputs=[mesh_state, layer_h, infill_sp, infill_a, alt_angle, nozzle_t, bed_t],
-                    outputs=[planar_plot, planar_stats, planar_gcode_file, planar_gcode_preview],
+                    outputs=[
+                        planar_plot, planar_stats, planar_gcode_file, planar_gcode_preview,
+                        planar_part_state, planar_lo, planar_hi,
+                    ],
+                )
+                planar_lo.release(
+                    _replot_planar,
+                    inputs=[planar_part_state, planar_lo, planar_hi],
+                    outputs=[planar_plot],
+                )
+                planar_hi.release(
+                    _replot_planar,
+                    inputs=[planar_part_state, planar_lo, planar_hi],
+                    outputs=[planar_plot],
                 )
 
             with gr.Tab("3. Curved layer (5-axis)"):
@@ -393,10 +474,15 @@ def build_app() -> gr.Blocks:
                         curved_btn = gr.Button("Slice (curved 5-axis)", variant="primary")
                     with gr.Column(scale=2):
                         curved_plot = gr.Plot(label="Curved layers + paths + sampled tool axes")
+                        with gr.Row():
+                            curved_lo = gr.Slider(0, 100, value=0, step=1, label="Show from layer (%)")
+                            curved_hi = gr.Slider(0, 100, value=100, step=1, label="… up to layer (%)")
                         curved_obj = gr.Model3D(label="Curved-layer surfaces (download)", height=300)
                         curved_stats = gr.Markdown("*Run the curved slicer to see stats.*")
                         curved_gcode_file = gr.File(label="Download 5-axis G-code", interactive=False)
                         curved_gcode_preview = gr.Code(label="G-code preview", language=None, lines=12)
+
+                curved_state = gr.State(value=None)
 
                 curved_btn.click(
                     _run_curved_slice,
@@ -405,7 +491,20 @@ def build_app() -> gr.Blocks:
                         curved_spacing, tau_min, tau_max, flatness_w, smoothness_w,
                         z_target, use_target,
                     ],
-                    outputs=[curved_plot, curved_stats, curved_obj, curved_gcode_file, curved_gcode_preview],
+                    outputs=[
+                        curved_plot, curved_stats, curved_obj, curved_gcode_file,
+                        curved_gcode_preview, curved_state, curved_lo, curved_hi,
+                    ],
+                )
+                curved_lo.release(
+                    _replot_curved,
+                    inputs=[curved_state, curved_lo, curved_hi],
+                    outputs=[curved_plot],
+                )
+                curved_hi.release(
+                    _replot_curved,
+                    inputs=[curved_state, curved_lo, curved_hi],
+                    outputs=[curved_plot],
                 )
 
             with gr.Tab("4. Kinematics inspector"):
