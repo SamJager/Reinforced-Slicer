@@ -67,6 +67,80 @@ _WORK_DIR.mkdir(parents=True, exist_ok=True)
 # --- Tab 1: load & preview ----------------------------------------------
 
 
+def _quality_updates_for_stats(stats: dict[str, Any] | None):
+    """Compute (quality_md_update, repair_btn_update, log_clear_update) tuple."""
+    warning = mesh_quality_warning(stats) if stats else None
+    if warning:
+        return (
+            gr.update(value=warning, visible=True),
+            gr.update(visible=True),
+            gr.update(visible=False, value=""),
+        )
+    return (
+        gr.update(visible=False),
+        gr.update(visible=False),
+        gr.update(visible=False, value=""),
+    )
+
+
+def on_repair(mesh: trimesh.Trimesh | None):
+    """Click handler for the mesh-repair button on Tab 1."""
+    if mesh is None:
+        return (
+            mesh,
+            gr.update(visible=False),
+            gr.update(visible=False),
+            "*No mesh to repair.*",
+            gr.update(visible=False),
+            None,
+        )
+    fixed, log = repair_mesh(mesh)
+    new_stats = mesh_stats(fixed)
+    quality_u, repair_u, _ = _quality_updates_for_stats(new_stats)
+    out = _WORK_DIR / "repaired.stl"
+    fixed.export(out)
+    log_md = "Repair log:\n\n" + "\n".join(f"- {line}" for line in log)
+    return (
+        fixed, quality_u, repair_u,
+        _format_stats(new_stats),
+        gr.update(value=log_md, visible=True),
+        str(out),
+    )
+
+
+def repair_mesh(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, list[str]]:
+    """Run trimesh's standard repair pipeline; return the fixed mesh + log."""
+    log: list[str] = []
+    if mesh is None:
+        return mesh, ["no mesh"]
+    fixed = mesh.copy()
+
+    n_unref_before = len(fixed.vertices) - len(set(fixed.faces.flatten()))
+    fixed.remove_unreferenced_vertices()
+    log.append(f"removed {n_unref_before} unreferenced vertices")
+
+    n_dup = len(fixed.faces)
+    fixed.update_faces(fixed.unique_faces())
+    n_dup -= len(fixed.faces)
+    log.append(f"removed {n_dup} duplicate faces")
+
+    try:
+        trimesh.repair.fix_normals(fixed)
+        log.append("fixed face winding")
+    except Exception as exc:  # noqa: BLE001
+        log.append(f"fix_normals failed: {exc}")
+
+    try:
+        n_open_before = sum(1 for _ in trimesh.grouping.group_rows(fixed.edges_sorted, require_count=1))
+        trimesh.repair.fill_holes(fixed)
+        n_open_after = sum(1 for _ in trimesh.grouping.group_rows(fixed.edges_sorted, require_count=1))
+        log.append(f"filled holes: {n_open_before} -> {n_open_after} open edges")
+    except Exception as exc:  # noqa: BLE001
+        log.append(f"fill_holes failed: {exc}")
+
+    return fixed, log
+
+
 def _load_uploaded_stl(file_obj: Any) -> tuple[trimesh.Trimesh | None, str, dict[str, Any] | None, str | None]:
     if file_obj is None:
         return None, "Upload a mesh file (STL/OBJ/PLY) to begin.", None, None
@@ -114,6 +188,7 @@ def _run_planar_slice(
     alternate_angle: bool,
     nozzle_temp: int,
     bed_temp: int,
+    progress=gr.Progress(),
 ):
     if mesh is None:
         empty_slider = gr.update(maximum=1, value=100)
@@ -121,6 +196,7 @@ def _run_planar_slice(
             None, "Load a mesh first (Tab 1).", None, "",
             None, empty_slider, empty_slider,
         )
+    progress(0.1, desc="Configuring slicer")
     slice_cfg = PlanarSliceConfig(
         layer_height=float(layer_height),
         infill_spacing=float(infill_spacing),
@@ -128,12 +204,16 @@ def _run_planar_slice(
         alternate_angle=bool(alternate_angle),
     )
     gcode_cfg = GcodeConfig(nozzle_temp_c=int(nozzle_temp), bed_temp_c=int(bed_temp))
+    progress(0.3, desc="Slicing")
     part = slice_planar(mesh, slice_cfg)
+    progress(0.7, desc="Writing G-code")
     gcode_path = _WORK_DIR / "planar.gcode"
     write_gcode(part, gcode_path, gcode_cfg)
+    progress(0.85, desc="Rendering plot")
     fig = planar_slice_plotly(part)
     geo_stats = planar_slice_stats(part)
     print_stats = parse_gcode_stats(gcode_path.read_text(), default_feed_mm_per_min=1800.0).to_dict()
+    progress(1.0, desc="Done")
     summary = (
         "### Geometry\n" + _format_stats(geo_stats)
         + "\n\n### Print stats (kinematic estimate)\n" + _format_stats(print_stats)
@@ -172,6 +252,7 @@ def _run_curved_slice(
     smoothness_weight: float,
     z_target_override: float,
     use_z_target_override: bool,
+    progress=gr.Progress(),
 ):
     if mesh is None and shoebox is None:
         empty_slider = gr.update(maximum=1, value=100)
@@ -180,6 +261,7 @@ def _run_curved_slice(
             None, empty_slider, empty_slider,
         )
 
+    progress(0.05, desc="Preparing tet mesh")
     if shoebox is None:
         shoebox = shoebox_tet_mesh_from_stl(mesh, subdivisions=int(subdivisions))
 
@@ -191,6 +273,7 @@ def _run_curved_slice(
         z_target=float(z_target_override) if use_z_target_override else None,
     )
     machine = AcTableMachine()
+    progress(0.2, desc="Solving CurviSlicer QP")
     result = curved_layer_5axis_pipeline(
         shoebox.mesh,
         shoebox.top_indices,
@@ -201,16 +284,20 @@ def _run_curved_slice(
         curvi_config=cfg,
     )
 
+    progress(0.55, desc="Extracting iso-surfaces")
     field = result.field
     iso_layers = extract_curved_layers(shoebox.mesh, field, layer_height=float(layer_height))
+    progress(0.75, desc="Planning paths on curved layers")
     oriented_layers = _replan_paths_for_viz(iso_layers, float(path_spacing))
 
+    progress(0.9, desc="Exporting OBJ + G-code")
     obj_path = _WORK_DIR / "curved_layers.obj"
     export_iso_surfaces_obj(iso_layers, obj_path)
 
     gcode_path = _WORK_DIR / "curved_5axis.gcode"
     gcode_path.write_text(result.gcode)
 
+    progress(0.95, desc="Rendering plot")
     fig = curved_layers_plotly(iso_layers, oriented_layers, show_normals_every=12)
     geo_stats = curved_layer_stats(result)
     print_stats = parse_gcode_stats(result.gcode, default_feed_mm_per_min=1800.0).to_dict()
@@ -277,10 +364,12 @@ def _run_comparison(
     curved_layer_h: float,
     curved_spacing: float,
     arrow_density: int,
+    progress=gr.Progress(),
 ):
     if mesh is None and shoebox is None:
         return None, "Load a mesh first (Tab 1).", "", ""
 
+    progress(0.1, desc="Running planar slicer")
     # Planar pipeline.
     part = slice_planar(
         mesh if mesh is not None else _shoebox_surface_mesh(shoebox),
@@ -293,6 +382,7 @@ def _run_comparison(
     write_gcode(part, planar_path, GcodeConfig())
 
     # Curved pipeline.
+    progress(0.4, desc="Running curved-layer pipeline")
     if shoebox is None:
         shoebox = shoebox_tet_mesh_from_stl(mesh, subdivisions=int(subdivisions))
     machine = AcTableMachine()
@@ -309,6 +399,7 @@ def _run_comparison(
     iso_layers = extract_curved_layers(shoebox.mesh, curved.field, layer_height=float(curved_layer_h))
     oriented = _replan_paths_for_viz(iso_layers, float(curved_spacing))
 
+    progress(0.85, desc="Rendering side-by-side plot")
     fig = side_by_side_plotly(part, iso_layers, oriented, show_normals_every=int(arrow_density))
 
     summary = comparison_summary_markdown(
@@ -441,40 +532,43 @@ def build_app() -> gr.Blocks:
                     with gr.Column(scale=2):
                         model3d = gr.Model3D(label="3D preview", height=500)
                         quality_md = gr.Markdown(visible=False)
+                        repair_btn = gr.Button("Repair mesh (fix normals, fill holes)", variant="secondary", visible=False)
+                        repair_log = gr.Markdown(visible=False)
                         stats_md = gr.Markdown("*No mesh loaded yet.*")
 
                 def on_upload(file_path):
                     mesh, msg, stats, viz_path = _load_uploaded_stl(file_path)
-                    if stats:
-                        stats_md_val = _format_stats(stats)
-                        warning = mesh_quality_warning(stats)
-                        quality_update = (
-                            gr.update(value=warning, visible=True)
-                            if warning else gr.update(visible=False)
-                        )
-                    else:
-                        stats_md_val = "*No stats — load failed.*"
-                        quality_update = gr.update(visible=False)
-                    return mesh, msg, stats_md_val, viz_path, None, quality_update
+                    stats_md_val = _format_stats(stats) if stats else "*No stats — load failed.*"
+                    quality_u, repair_u, log_u = _quality_updates_for_stats(stats)
+                    return mesh, msg, stats_md_val, viz_path, None, quality_u, repair_u, log_u
 
                 upload.change(
                     on_upload,
                     inputs=[upload],
-                    outputs=[mesh_state, load_status, stats_md, model3d, shoebox_state, quality_md],
+                    outputs=[
+                        mesh_state, load_status, stats_md, model3d, shoebox_state,
+                        quality_md, repair_btn, repair_log,
+                    ],
                 )
 
                 def on_cube(extent, sub, tilt):
                     mesh, msg, stats, viz_path, shoebox = _make_synthetic_cube(extent, sub, tilt)
-                    warning = mesh_quality_warning(stats)
-                    quality_update = (
-                        gr.update(value=warning, visible=True) if warning else gr.update(visible=False)
-                    )
-                    return mesh, msg, _format_stats(stats), viz_path, shoebox, quality_update
+                    quality_u, repair_u, log_u = _quality_updates_for_stats(stats)
+                    return mesh, msg, _format_stats(stats), viz_path, shoebox, quality_u, repair_u, log_u
 
                 cube_btn.click(
                     on_cube,
                     inputs=[cube_extent, cube_subdiv, cube_tilt],
-                    outputs=[mesh_state, load_status, stats_md, model3d, shoebox_state, quality_md],
+                    outputs=[
+                        mesh_state, load_status, stats_md, model3d, shoebox_state,
+                        quality_md, repair_btn, repair_log,
+                    ],
+                )
+
+                repair_btn.click(
+                    on_repair,
+                    inputs=[mesh_state],
+                    outputs=[mesh_state, quality_md, repair_btn, stats_md, repair_log, model3d],
                 )
 
             with gr.Tab("2. Planar slice (3-axis)"):
